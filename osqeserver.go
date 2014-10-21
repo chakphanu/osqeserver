@@ -30,9 +30,11 @@ var (
 )
 
 type DataSend struct {
-	Name string
-	Room string
-	Data string
+	Name   string
+	Room   string
+	Data   string
+	Lock   bool
+	Unlock bool
 }
 
 type Client struct {
@@ -151,17 +153,6 @@ func Cli(clientList *list.List, roomChanRead chan TRoomRead) {
 			Info.Println("CLI: client.MuteList: ", c.MuteList)
 
 		}
-		/*
-			chanClientList := make(chan *list.List)
-			client.roomRead <- TRoomRead{, chanClientList}
-			clientList := <-chanClientList
-			Info.Println("CLI Room len: ", clientList.Len())
-			for e := clientList.Front(); e != nil; e = e.Next() {
-				c := e.Value.(*Client)
-				Info.Println("CLI: Room room:, ", c.Room, ", name:", c.Name)
-			}
-		*/
-
 	}
 }
 
@@ -203,6 +194,12 @@ func (c *Client) RemoveMe() {
 }
 
 func IOHandler(Incoming <-chan DataSend, clientList *list.List) {
+	type RLOCK struct {
+		isLock bool
+		Name   string
+	}
+	room_lock := make(map[string]RLOCK)
+
 	for {
 		Trace.Println("IOHandler: Waiting for input")
 		input := <-Incoming
@@ -221,6 +218,25 @@ func IOHandler(Incoming <-chan DataSend, clientList *list.List) {
 				Trace.Println("IOHandler: skip sending to ", client.Name, ", input.Room != client.Room && input.Room != ROOM_ALL, input.Room: ", input.Room, ", client.Room: ", client.Room)
 				continue
 			}
+
+			if input.Lock {
+				if _, ok := room_lock[input.Room]; ok {
+					if room_lock[input.Room].isLock && room_lock[input.Room].Name != input.Name {
+						Info.Println("IOHandler: skip, Room lock by ", room_lock[input.Room].Name)
+						continue
+					}
+				} else {
+					Info.Println("IOHandler: Room  ", input.Room, ", locking by ", input.Name)
+					room_lock[input.Room] = RLOCK{true, input.Name}
+				}
+
+			}
+
+			if input.Unlock && room_lock[input.Room].Name == input.Name {
+				Info.Println("IOHandler: Room  ", input.Room, ", unlocked by ", input.Name)
+				delete(room_lock, input.Room)
+			}
+
 			client.Incoming <- input
 		}
 	}
@@ -232,7 +248,7 @@ func SendRoomList(client *Client) {
 			0x04, 0x54, 0x45, 0x53, 0x54,
 			0x08, 0x54, 0x48, 0x41, 0x49, 0x4c, 0x41, 0x4e, 0x44,
 			0x02, 0x5a, 0x31,
-			0x02, 0x5a, 0x32})}
+			0x02, 0x5a, 0x32}), false, false}
 }
 
 func GetRoomMembers(client *Client) {
@@ -259,7 +275,7 @@ func GetRoomMembers(client *Client) {
 		client.Incoming <- DataSend{
 			SERVER_NAME,
 			client.Room,
-			string(0x16) + string(clientCount) + string([]byte{0x00, 0x00}) + tmp + string(0x00)}
+			string(0x16) + string(clientCount) + string([]byte{0x00, 0x00}) + tmp + string(0x00), false, false}
 	}
 }
 
@@ -295,7 +311,7 @@ func ClearOldRoomMembers(oldRoom string, client *Client) {
 		client.Incoming <- DataSend{
 			SERVER_NAME,
 			client.Room,
-			string(0x16) + string(i) + string([]byte{0x00, 0x00}) + tmp + string(0x00)}
+			string(0x16) + string(i) + string([]byte{0x00, 0x00}) + tmp + string(0x00), false, false}
 	}
 }
 
@@ -305,7 +321,7 @@ func SendMyNameToJoinRoom(client *Client) {
 		SERVER_NAME,
 		client.Room,
 		string(0x16) + string([]byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}) +
-			string(len(client.Name)) + client.Name + string(len(client.Message)) + client.Message + string(0x00)}
+			string(len(client.Name)) + client.Name + string(len(client.Message)) + client.Message + string(0x00), false, false}
 }
 
 func SendMyNameToLeftRoom(leftRoom string, client *Client) {
@@ -314,7 +330,7 @@ func SendMyNameToLeftRoom(leftRoom string, client *Client) {
 		SERVER_NAME,
 		leftRoom,
 		string(0x16) + string([]byte{0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00}) +
-			string(len(client.Name)) + client.Name + string(0x00)}
+			string(len(client.Name)) + client.Name + string(0x00), false, false}
 }
 
 func SendMyPttToRoom(client *Client) {
@@ -325,10 +341,10 @@ func SendMyPttToRoom(client *Client) {
 
 	Trace.Println("SendMyPttToRoom: ", client.Room)
 	client.Outgoing <- DataSend{
-		SERVER_NAME,
+		client.Name,
 		client.Room,
 		string(0x16) + string([]byte{0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}) +
-			string(len(client.Name)) + client.Name + string(0x00)}
+			string(len(client.Name)) + client.Name + string(0x00), true, false}
 }
 
 func SendMyReleaseToRoom(client *Client) {
@@ -339,20 +355,20 @@ func SendMyReleaseToRoom(client *Client) {
 
 	Trace.Println("SendMyReleaseToRoom: ", client.Room)
 	client.Outgoing <- DataSend{
-		SERVER_NAME,
+		client.Name,
 		client.Room,
 		string(0x16) + string([]byte{0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00}) +
-			string(len(client.Name)) + client.Name + string(0x00)}
+			string(len(client.Name)) + client.Name + string(0x00), true, true}
 
 	client.Outgoing <- DataSend{
 		SERVER_NAME,
 		client.Room,
-		string([]byte{0x08})}
+		string([]byte{0x08}), true, true}
 
 	client.Outgoing <- DataSend{
 		SERVER_NAME,
 		client.Room,
-		string([]byte{0x06, 0x00})}
+		string([]byte{0x06, 0x00}), true, true}
 
 }
 
@@ -363,7 +379,7 @@ func SendServerInfo(client *Client) {
 	client.Incoming <- DataSend{
 		SERVER_NAME,
 		ROOM_ALL,
-		string(0x16) + string([]byte{0x01, 0x00, 0x00}) + tmp + string(0x00)}
+		string(0x16) + string([]byte{0x01, 0x00, 0x00}) + tmp + string(0x00), false, false}
 }
 
 func SendClientError(client *Client, msg string) {
@@ -372,7 +388,7 @@ func SendClientError(client *Client, msg string) {
 	client.Incoming <- DataSend{
 		SERVER_NAME,
 		ROOM_ALL,
-		string(0x16) + string([]byte{0x01, 0x00, 0x00}) + tmp + string(0x00)}
+		string(0x16) + string([]byte{0x01, 0x00, 0x00}) + tmp + string(0x00), false, false}
 }
 
 func CheckExistName(clientList *list.List, name string) bool {
@@ -444,7 +460,7 @@ func ClientReader(client *Client) {
 						if bytes.Equal(bufs.Bytes(), []byte{0xa, 0x82, 0x00, 0x00, 0x00}) {
 							bufs.Reset()
 							Trace.Println("send 0xa, 0xfa, 0x00, 0x00, 0x00.")
-							client.Incoming <- DataSend{"", "", string([]byte{0xa, 0xfa, 0x00, 0x00, 0x00})}
+							client.Incoming <- DataSend{"", "", string([]byte{0xa, 0xfa, 0x00, 0x00, 0x00}), false, false}
 							find_cmd_token = 0
 							read_multibyte = false
 							SendServerInfo(client)
@@ -518,7 +534,7 @@ func ClientReader(client *Client) {
 
 				case 0x01: // voice
 					if len(bufs.Bytes()) == 198 {
-						client.Outgoing <- DataSend{client.Name, client.Room, string(0x01) + string(bufs.Bytes())}
+						client.Outgoing <- DataSend{client.Name, client.Room, string(0x01) + string(bufs.Bytes()), true, false}
 						bufs.Reset()
 						find_cmd_token = 0
 						read_multibyte = false
@@ -659,7 +675,7 @@ func pingpong(Incoming <-chan DataSend, clientList *list.List) {
 		for e := clientList.Front(); e != nil; e = e.Next() {
 			client := e.Value.(*Client)
 			Trace.Println("ping: ", client.Name)
-			client.Incoming <- DataSend{SERVER_NAME, ROOM_ALL, string([]byte{0x0c})}
+			client.Incoming <- DataSend{SERVER_NAME, ROOM_ALL, string([]byte{0x0c}), false, false}
 		}
 		time.Sleep(time.Second * 30)
 	}
